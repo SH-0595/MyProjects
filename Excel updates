@@ -1,0 +1,34 @@
+import pandas as pd
+import numpy as np
+
+#source file and target file paths to be updated accorfingly
+source_file_path = '/Users/.xlsx'
+target_file_path = '/Users/.xlsx'
+
+source_df = pd.read_excel(source_file_path)
+target_df = pd.read_excel(target_file_path)
+
+columns_to_update = ['dpe_personFullName', 'dpe_employeeNumber', 'dpe_contractGrade', 'dpe_workEmail',
+                    'dpe_workingHours', 'dpe_personFTE', 'dpe_sopCostCentreNumber', 'dpe_sopSalary', 
+                   'dpe_sopLineManagerName', 'dpe_sopLineManagerEmployeeNumber', 'dpe_sopLineManagerEmail', 'dpe_employmentExpectedEndDate', 'dpe_employmentEndDateJD',]
+
+key_columns = ['dpe_personFullName', 'dpe_employeeNumber']
+
+for i, source_row in source_df.iterrows():
+    match_condition = True
+    for key in key_columns:
+        match_condition &= (target_df[key] == source_row[key])
+
+    target_row_index = target_df[match_condition].index
+
+    if not target_row_index.empty:
+        for column in columns_to_update:
+            target_value = target_df.at[target_row_index[0], column]
+            source_value = source_row[column]
+            
+            if pd.isna(target_value) or source_value != target_value:
+                target_df.at[target_row_index[0], column] = source_value
+                
+target_df.to_excel(target_file_path, index=False)
+
+print("You did it Mate.")
