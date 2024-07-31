@@ -1,0 +1,51 @@
+import pandas as pd
+
+source_file_path = '/Users/saimir.hysa/Documents/TS WFP Validation/MasterData-TSWFP.xlsx'
+target_file_path = '/Users/saimir.hysa/Documents/TS WFP Validation/dig Workforce Plan2024-07-30 (12h54).xlsx'
+
+# Load the two Excel files
+doc1 = pd.read_excel(source_file_path)  # Replace with actual sheet name
+doc2 = pd.read_excel(target_file_path)  # Replace with actual sheet name
+
+# Define the identifier column
+identifier_column = 'Position Code'  # Replace with the actual identifier column
+
+# Ensure the identifier column exists in both documents
+assert identifier_column in doc1.columns, f"{identifier_column} not found in doc1"
+assert identifier_column in doc2.columns, f"{identifier_column} not found in doc2"
+
+# Set the identifier column as the index for easier comparison
+doc1.set_index(identifier_column, inplace=True)
+doc2.set_index(identifier_column, inplace=True)
+
+# Get the columns present in both documents (excluding the identifier column)
+common_columns = [col for col in doc1.columns if col in doc2.columns]
+
+# Create a new DataFrame for the comparison
+comparison_df = pd.DataFrame(index=doc1.index)
+
+# Compare each common column
+for column in common_columns:
+    comparison_df[f'{column} (Doc1)'] = doc1[column]
+    comparison_df[f'{column} (Doc2)'] = doc2[column]
+    comparison_df[f'{column} Comparison'] = comparison_df.apply(
+        lambda row: 'Match' if row[f'{column} (Doc1)'] == row[f'{column} (Doc2)'] else 'Mismatch', axis=1
+    )
+
+# Check for missing identifiers in either document
+doc1_missing_in_doc2 = doc1.index.difference(doc2.index)
+doc2_missing_in_doc1 = doc2.index.difference(doc1.index)
+
+# Adding missing identifiers as separate entries
+missing_df = pd.DataFrame(index=doc1_missing_in_doc2.union(doc2_missing_in_doc1))
+missing_df['Status'] = missing_df.index.map(lambda x: 'Missing in Doc2' if x in doc1_missing_in_doc2 else 'Missing in Doc1')
+missing_df['Doc1 Data'] = missing_df.index.map(lambda x: doc1.loc[x].to_dict() if x in doc1.index else {})
+missing_df['Doc2 Data'] = missing_df.index.map(lambda x: doc2.loc[x].to_dict() if x in doc2.index else {})
+
+# Save the comparison result to a new Excel file
+with pd.ExcelWriter('comparison_result1.xlsx') as writer:
+    comparison_df.to_excel(writer, sheet_name='Comparison', index_label=identifier_column)
+    if not missing_df.empty:
+        missing_df.to_excel(writer, sheet_name='Missing Identifiers')
+
+print("Comparison complete. Results saved to 'comparison_result1.xlsx'.")
