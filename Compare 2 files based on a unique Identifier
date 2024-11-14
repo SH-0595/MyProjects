@@ -1,7 +1,7 @@
 import pandas as pd
 
-source_file_path = '/Users/saimir.hysa/Documents/TS WFP Validation/MasterData-TSWFP.xlsx'
-target_file_path = '/Users/saimir.hysa/Documents/TS WFP Validation/dig Workforce Plan2024-07-30 (12h54).xlsx'
+source_file_path = '/Users/.xlsx'
+target_file_path = '/Users/.xlsx'
 
 # Load the two Excel files
 doc1 = pd.read_excel(source_file_path)  # Replace with actual sheet name
