@@ -1,0 +1,1744 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### DATA USED\n",
+    "* XLSX from Fieldglass \"MOJ_Full_Headcount_v2.xlsx\"\n",
+    "* CSV from Orgvue (Settings, Download data)\n",
+    "* Locations \"dig Location Lookup.csv\"\n",
+    "* New IDs \"new_orgvue_ids.csv\". This file needs to be filled up with new IDs.\n",
+    "\n",
+    "### PROCESS\n",
+    "1. Fieldglass is the primary data. It is filtered and duplicates are removed.\n",
+    "2. Orgvue is filtered to show only contractors and columns dropped and duplicates dropped.\n",
+    "3. Orgvue is left merged into Fieldglass. New contractors are lines with no Person ID.\n",
+    "4. New IDs and creation date are added where missing\n",
+    "5. Data for Orgvue is copied to the clipboard and saved to Excel and can be uploaded into Orgvue as is.\n",
+    "\n",
+    "#### FIlTERING FIELDGLASS\n",
+    "Harry Egerton <Harry.Egerton@publicsectorresourcing.co.uk> has confirmed these work.\n",
+    "\n",
+    "* Business Unit Code:    \"MOJ MOJ CFO DaT\"\n",
+    "\n",
+    "##### Leavers in September:\n",
+    "* Work Order Status:     Confirmed (Worker Closed)\n",
+    "* Current Work Order?:   No\n",
+    "* Work Order End Date:   01/09/2023 to 30/09/2023\n",
+    "\n",
+    "##### Joiners in September:\n",
+    "* Work Order Status:     Confirmed\n",
+    "* Current Work Order?:   Yes\n",
+    "* Original start date:   01/09/2023 to 30/09/2023 (where this date…\n",
+    "* Work Order Start Date: 01/09/2023 to 30/09/2023 …equals this date)\n",
+    "\n",
+    "##### Extensions in September\n",
+    "* Work Order Status:     Confirmed\n",
+    "* Current Work Order?:   Yes\n",
+    "* Original start date:   01/09/2023 to 30/09/2023 (where this date…\n",
+    "* Work Order Start Date: 01/09/2023 to 30/09/2023 …does NOT equal this date)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Setup"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 142,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# LIBRARIES\n",
+    "# Used for merges and manipulation\n",
+    "import pandas as pd\n",
+    "# Used to set dpe_dateCreated and timestamp the file\n",
+    "import datetime\n",
+    "from datetime import date\n",
+    "# Used for GUI objects\n",
+    "import tkinter as tk\n",
+    "from tkinter import filedialog\n",
+    "import tkinter.messagebox as messagebox\n",
+    "# Used to terminate the tkinter that's too persistent. Should not be needed.\n",
+    "import sys\n",
+    "\n",
+    "# Raw Fieldglass export will be reduced to these columns.\n",
+    "# Used to filter or add data to Orgvue\n",
+    "fg_cols_to_keep = [\n",
+    "    'Work Order ID', # Unique(ish) ID added to Orgvue dpe_contractorNumber\n",
+    "    'Candidate / Worker', # Becomes dpe_psrFullName which is used to merge with Orgvue\n",
+    "    'Internal Job Title', # Becomes dpe_jobTitle\n",
+    "    'Cost Centre', # Audit trail, becomes dpe_psrCostCentre\n",
+    "    'Original start date', # Identifies joiners\n",
+    "    'Work Order Start Date', # Joiners and Exensions\n",
+    "    'Work Order End Date', # Leavers\n",
+    "    'Pay Rate [ST/Day]', # Day rate\n",
+    "    'Bill Rate [ST/Day]', # Cost to the business\n",
+    "    'Location', # Used to merge in a location ID from lookup table in \"dig Location Lookup.csv\"\n",
+    "    'Worker Supervisor Email',\n",
+    "    'Revision #',\n",
+    "    'Work Order Status',\n",
+    "    'Current Work Order?',\n",
+    "    'Requisition Type' # There could be a pattern here but I don't know what it is. Keeping it for reference.\n",
+    "]\n",
+    "\n",
+    "#  After slicing to just contractors, the dataframe is reduced to this. Fieldglass will be left merged onto it.\n",
+    "ov_cols_to_keep = [\n",
+    "    'dpe_contractorNumber',\n",
+    "    'dpe_psrFullName',\n",
+    "    'dpe_jobTitle',\n",
+    "    'dpe_psrCostCentre',\n",
+    "    'dpe_payRateDay',\n",
+    "    'dpe_billRateDay',\n",
+    "    'dpe_locationID',\n",
+    "    'dpe_workSupervisorEmail',\n",
+    "    'dpe_originalStartDate',\n",
+    "    'dpe_workOrderStartDate',\n",
+    "    'dpe_workOrderEndDate',\n",
+    "    'dpe_requisitionType',\n",
+    "    'dpe_revisionNumber',\n",
+    "    'dpe_workOrderStatus',\n",
+    "    'dpe_currentWorkOrder',\n",
+    "    'dpe_contractorStatus',\n",
+    "    'dpe_psrID',\n",
+    "    'dpe_dateCreated',\n",
+    "    'dpe_personID',\n",
+    "    'dpe_personSurname',\n",
+    "    'dpe_personFirstName',\n",
+    "    'dpe_personPreferredFirstName',\n",
+    "    'dpe_employmentType'\n",
+    "]\n",
+    "\n",
+    "ov_cols_to_keep_for_merge = [\n",
+    "    'dpe_personID',\n",
+    "    'dpe_psrID'\n",
+    "]\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 143,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#Create a root window and then hide it\n",
+    "#root = tk.Tk()\n",
+    "#root.withdraw()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 144,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# FILE FOLDERS (Use when testing)\n",
+    "# Useful for debugging\n",
+    "#fg_path = \"/Users/james.holiday-scott/Library/CloudStorage/OneDrive-MinistryofJustice/Data Management/new_starters_contractors/MOJ_Full_Headcount_v2.xlsx\"\n",
+    "#ov_path = \"/Users/james.holiday-scott/Downloads/dig Workforce People Data (1).csv\"\n",
+    "#working_files_path = \"/Users/james.holiday-scott/Library/CloudStorage/OneDrive-MinistryofJustice/Data Management/new_starters_contractors\"\n",
+    "\n",
+    "fg_path = \"/Users/saimir.hysa/Downloads/MOJ_Full_Headcount.xlsx\"\n",
+    "ov_path = \"/Users/saimir.hysa/Downloads/orgvue_contractors.csv\"\n",
+    "working_files_path = \"/Users/saimir.hysa/Library/CloudStorage/OneDrive-MinistryofJustice/Data Management/new_starters_contractors\"\n",
+    "output_path = \"/Users/saimir.hysa/Downloads/\"\n",
+    "# Working Filenames\n",
+    "locations_file = \"dig Location Lookup.csv\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 145,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# FILE FOLDERS (Use with tkinter)\n",
+    "# Get all the files we need and set the paths\n",
+    "# def get_files():\n",
+    "#     # Fieldglass\n",
+    "#     messagebox.showinfo(\"Fieldglass\", \"First, select the Fieldglass extract (XLSX) you want to use...\")\n",
+    "#     fg_path = filedialog.askopenfilename(filetypes=[(\"Excel files\", \"*.xlsx\")])\n",
+    "#     # Orgvue\n",
+    "#     messagebox.showinfo(\"Orgvue\", \"Second, select the Orgvue extract (CSV) you want to use...\")\n",
+    "#     ov_path = filedialog.askopenfilename(filetypes=[(\"CSV files\", \"*.csv\")])\n",
+    "#     # Location file and New ID file\n",
+    "#     messagebox.showinfo(\"Working\", \"Finally, select the folder with the working files...\")\n",
+    "#     working_files_path = filedialog.askdirectory()\n",
+    "#     # Return as a tuple\n",
+    "#     return fg_path, ov_path, working_files_path\n",
+    "\n",
+    "# Get the files we need and unpack the tuple\n",
+    "# fg_path, ov_path, working_files_path = get_files()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 146,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Takes n Position IDs from the working file, deletes those rows, and writes the leftovers to the file\n",
+    "def extract_ID(count, filename):\n",
+    "    # open the file\n",
+    "    new_orgvue_ids = pd.read_csv(filename)\n",
+    "    # select the range we want based on count rows\n",
+    "    range_to_keep = range(0,count)\n",
+    "    # slice off the bit we want\n",
+    "    new_to_use = new_orgvue_ids[new_orgvue_ids.index.isin(range_to_keep)].copy()\n",
+    "    # slice off the bit we don't want\n",
+    "    left_over = new_orgvue_ids[~new_orgvue_ids.index.isin(range_to_keep)].copy()\n",
+    "    # tell the user what's happening\n",
+    "    # messagebox.showinfo(\"FYI\", f\"Using {count} new Orgvue IDs. There are {len(left_over)} IDs remaining.\")\n",
+    "    # overwrite with mode=\"w\" smaller unwanted list so we don't use the same IDs twice\n",
+    "    left_over.to_csv(filename, index=False, mode='w')\n",
+    "    # add today's date so we can keep track\n",
+    "    # new_to_use['dpe_dateCreated'] = date.today()\n",
+    "    # new_to_use.reset_index(drop=True, inplace=True)\n",
+    "    return new_to_use\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Functions"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 147,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Write to XLSX with time stamp\n",
+    "def to_excel(filename, df):\n",
+    "    timestamp = datetime.datetime.now().strftime('%Y-%m-%d@%H.%M.%S')\n",
+    "    filename = f'{output_path}/{filename} {timestamp}.xlsx'\n",
+    "    df.to_excel(filename, index=False)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 148,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# # Read and transform Fieldglass data\n",
+    "# def load_fg(filepath):\n",
+    "#     # filepath from tkinter\n",
+    "#     all_fg = pd.read_excel(filepath, skiprows=1)\n",
+    "#     # filter to our part of Justice Digital and fully open work orders\n",
+    "#     jd_fg = all_fg[(all_fg['Business Unit Code'] == 'MOJ MOJ CFO DaT') & (all_fg['Work Order Status'] == 'Confirmed')]\n",
+    "#     # reduce columns\n",
+    "#     jd_fg = jd_fg[fg_cols_to_keep].copy(deep=True)\n",
+    "#     jd_fg.reset_index(drop=True, inplace=True)\n",
+    "#     # rename columns to Orgvue keys\n",
+    "#     jd_fg.rename(columns={'Work Order ID': 'dpe_contractorNumber'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Candidate / Worker': 'dpe_psrFullName'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Internal Job Title': 'dpe_jobTitle'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Cost Centre': 'dpe_psrCostCentre'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Work Order Start Date': 'dpe_employmentStartDateJD'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Work Order End Date': 'dpe_employmentExpectedEndDate'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Pay Rate [ST/Day]': 'dpe_payRateDay'}, inplace=True)\n",
+    "#     jd_fg.rename(columns={'Location': 'dlo_townCity'}, inplace=True)\n",
+    "#     # create Orgvue compatible names from Fieldglass name field\n",
+    "#     jd_fg['dpe_personSurname'] = jd_fg['dpe_psrFullName'].str.split(',').str[0].str.strip()\n",
+    "#     jd_fg['dpe_personFirstName'] = jd_fg['dpe_psrFullName'].str.split(',').str[1].str.strip()\n",
+    "#     jd_fg['dpe_personPreferredFirstName'] = jd_fg['dpe_psrFullName'].str.split(',').str[1].str.strip()\n",
+    "#     # merge in locations from the lookup table\n",
+    "#     jd_fg = merge_locations(jd_fg)\n",
+    "#     # set Orgvue employment type\n",
+    "#     jd_fg['dpe_employmentType'] = 'Contractor'\n",
+    "#     return jd_fg\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Fieldglass - Main dataframe \"all_fg\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 149,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Read and transform Fieldglass data\n",
+    "def load_fg(filepath):\n",
+    "    # filepath from tkinter\n",
+    "    all_fg = pd.read_excel(filepath, skiprows=1)\n",
+    "    # filter to our part of Justice Digital and fully open work orders\n",
+    "    jd_fg = all_fg[all_fg['Business Unit Code'] == 'MOJ MOJ CFO DaT'] #& (all_fg['test_row'] == 1\n",
+    "    return jd_fg\n",
+    "\n",
+    "def reduce_and_rename_cols_in_fg(dataframe):\n",
+    "    # reduce columns\n",
+    "    jd_fg = dataframe[fg_cols_to_keep].copy(deep=True)\n",
+    "    jd_fg.reset_index(drop=True, inplace=True)\n",
+    "    # rename columns to Orgvue keys\n",
+    "    jd_fg.rename(columns={'Work Order ID': 'dpe_contractorNumber'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Candidate / Worker': 'dpe_psrFullName'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Internal Job Title': 'dpe_jobTitle'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Cost Centre': 'dpe_psrCostCentre'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Pay Rate [ST/Day]': 'dpe_payRateDay'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Bill Rate [ST/Day]': 'dpe_billRateDay'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Location': 'dlo_townCity'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Worker Supervisor Email':'dpe_workSupervisorEmail'}, inplace=True)\n",
+    "    \n",
+    "\n",
+    "    # For finding starters, leavers, extensions\n",
+    "    jd_fg.rename(columns={'Original start date': 'dpe_originalStartDate'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Work Order Start Date': 'dpe_workOrderStartDate'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Work Order End Date': 'dpe_workOrderEndDate'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Work Order End Date': 'dpe_employmentExpectedEndDate'}, inplace=True)\n",
+    "    \n",
+    "    \n",
+    "    jd_fg.rename(columns={'Requisition Type': 'dpe_requisitionType'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Revision #': 'dpe_revisionNumber'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Work Order Status': 'dpe_workOrderStatus'}, inplace=True)\n",
+    "    jd_fg.rename(columns={'Current Work Order?': 'dpe_currentWorkOrder'}, inplace=True)\n",
+    "\n",
+    "    # Create to match destination table\n",
+    "    jd_fg['dpe_personID'] = None\n",
+    "    \n",
+    "    # Date time stuff\n",
+    "\n",
+    "    # Add creation date\n",
+    "    timestamp = datetime.datetime.now().date()\n",
+    "    jd_fg['dpe_dateCreated'] = timestamp\n",
+    "\n",
+    "    # Convert Fieldglass datetime to date\n",
+    "    jd_fg['dpe_originalStartDate'] = pd.to_datetime(jd_fg['dpe_originalStartDate']).dt.date\n",
+    "    jd_fg['dpe_workOrderStartDate'] = pd.to_datetime(jd_fg['dpe_workOrderStartDate']).dt.date\n",
+    "    jd_fg['dpe_workOrderEndDate'] = pd.to_datetime(jd_fg['dpe_workOrderEndDate']).dt.date\n",
+    "    \n",
+    "    return jd_fg\n",
+    "\n",
+    "    \n",
+    "\n",
+    "def make_names_in_fg(dataframe):\n",
+    "    # create Orgvue compatible names from Fieldglass name field\n",
+    "    dataframe['dpe_personSurname'] = dataframe['dpe_psrFullName'].str.split(',').str[0].str.strip()\n",
+    "    dataframe['dpe_personFirstName'] = dataframe['dpe_psrFullName'].str.split(',').str[1].str.strip()\n",
+    "    dataframe['dpe_personPreferredFirstName'] = dataframe['dpe_psrFullName'].str.split(',').str[1].str.strip()\n",
+    "    return dataframe\n",
+    "\n",
+    "def make_psrID_in_fg(dataframe):\n",
+    "    # [node.dpe_personSurname, node.dpe_personFirstName, node.dpe_psrCostCentre].join(\"-\")\n",
+    "    dataframe[\"dpe_psrID\"] = dataframe[\"dpe_personSurname\"] + \"-\" + dataframe[\"dpe_personFirstName\"] + \"-\" + dataframe[\"dpe_psrCostCentre\"]\n",
+    "    return dataframe\n",
+    "\n",
+    "# Merge office location ID from file\n",
+    "def merge_locations(df):\n",
+    "    # Open locations CSV and make a dataframe\n",
+    "    locations = pd.read_csv(working_files_path + \"/\" + locations_file)\n",
+    "    # left merge to retain lines where there is no match\n",
+    "    df = df.merge(locations, on='dlo_townCity', how='left')\n",
+    "    # remove the old column\n",
+    "    df.drop('dlo_townCity', axis=1, inplace=True)\n",
+    "    return df\n",
+    "\n",
+    "def add_employment_type_in_fg(dataframe):\n",
+    "    # set Orgvue employment type\n",
+    "    dataframe['dpe_employmentType'] = 'Specialist Contractor'\n",
+    "    return dataframe\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 150,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = load_fg(fg_path)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 151,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = reduce_and_rename_cols_in_fg(fg_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 152,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = make_names_in_fg(fg_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 153,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = add_employment_type_in_fg(fg_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 154,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = make_psrID_in_fg(fg_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 155,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "fg_raw = merge_locations(fg_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 156,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Fresh dataframe to work with\n",
+    "fg_all = fg_raw.copy(deep=True)\n",
+    "fg_all.reset_index(drop=True, inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 157,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(1928, 22)"
+      ]
+     },
+     "execution_count": 157,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Should be 22 columns\n",
+    "fg_all.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 158,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>dpe_contractorNumber</th>\n",
+       "      <th>dpe_psrFullName</th>\n",
+       "      <th>dpe_jobTitle</th>\n",
+       "      <th>dpe_psrCostCentre</th>\n",
+       "      <th>dpe_originalStartDate</th>\n",
+       "      <th>dpe_workOrderStartDate</th>\n",
+       "      <th>dpe_workOrderEndDate</th>\n",
+       "      <th>dpe_payRateDay</th>\n",
+       "      <th>dpe_billRateDay</th>\n",
+       "      <th>dpe_workSupervisorEmail</th>\n",
+       "      <th>...</th>\n",
+       "      <th>dpe_currentWorkOrder</th>\n",
+       "      <th>dpe_requisitionType</th>\n",
+       "      <th>dpe_personID</th>\n",
+       "      <th>dpe_dateCreated</th>\n",
+       "      <th>dpe_personSurname</th>\n",
+       "      <th>dpe_personFirstName</th>\n",
+       "      <th>dpe_personPreferredFirstName</th>\n",
+       "      <th>dpe_employmentType</th>\n",
+       "      <th>dpe_psrID</th>\n",
+       "      <th>dpe_locationID</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>PSR1WO00095198</td>\n",
+       "      <td>Moise, Neville</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>10224354</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>2025-11-24</td>\n",
+       "      <td>450.0</td>\n",
+       "      <td>513.83</td>\n",
+       "      <td>recruitment@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Moise</td>\n",
+       "      <td>Neville</td>\n",
+       "      <td>Neville</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Moise-Neville-10224354</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>PSR1WO00095243</td>\n",
+       "      <td>Aszyk, Lukasz</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>10224441</td>\n",
+       "      <td>2024-11-19</td>\n",
+       "      <td>2024-11-19</td>\n",
+       "      <td>2025-03-31</td>\n",
+       "      <td>600.0</td>\n",
+       "      <td>685.10</td>\n",
+       "      <td>recruitment@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Aszyk</td>\n",
+       "      <td>Lukasz</td>\n",
+       "      <td>Lukasz</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Aszyk-Lukasz-10224441</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>PSR1WO00095456</td>\n",
+       "      <td>Versi, Abbas</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>10224411</td>\n",
+       "      <td>2024-12-02</td>\n",
+       "      <td>2024-12-02</td>\n",
+       "      <td>2025-03-31</td>\n",
+       "      <td>650.0</td>\n",
+       "      <td>742.20</td>\n",
+       "      <td>gwion.aprhobat@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Versi</td>\n",
+       "      <td>Abbas</td>\n",
+       "      <td>Abbas</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Versi-Abbas-10224411</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>PSR1WO00095541</td>\n",
+       "      <td>Bakpa, Ovovwe</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>10224306</td>\n",
+       "      <td>2024-11-12</td>\n",
+       "      <td>2024-11-12</td>\n",
+       "      <td>2025-05-11</td>\n",
+       "      <td>650.0</td>\n",
+       "      <td>742.20</td>\n",
+       "      <td>terrie.matharu@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Bakpa</td>\n",
+       "      <td>Ovovwe</td>\n",
+       "      <td>Ovovwe</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Bakpa-Ovovwe-10224306</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>PSR1WO00095604</td>\n",
+       "      <td>Belsey, Robin</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>10224303</td>\n",
+       "      <td>2024-11-18</td>\n",
+       "      <td>2024-11-18</td>\n",
+       "      <td>2026-11-17</td>\n",
+       "      <td>799.0</td>\n",
+       "      <td>818.18</td>\n",
+       "      <td>sonia.taylor@Justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>2. Nominated</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Belsey</td>\n",
+       "      <td>Robin</td>\n",
+       "      <td>Robin</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Belsey-Robin-10224303</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 22 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "  dpe_contractorNumber dpe_psrFullName dpe_jobTitle dpe_psrCostCentre  \\\n",
+       "0       PSR1WO00095198  Moise, Neville          NaN          10224354   \n",
+       "1       PSR1WO00095243   Aszyk, Lukasz          NaN          10224441   \n",
+       "2       PSR1WO00095456    Versi, Abbas          NaN          10224411   \n",
+       "3       PSR1WO00095541   Bakpa, Ovovwe          NaN          10224306   \n",
+       "4       PSR1WO00095604   Belsey, Robin          NaN          10224303   \n",
+       "\n",
+       "  dpe_originalStartDate dpe_workOrderStartDate dpe_workOrderEndDate  \\\n",
+       "0            2024-11-25             2024-11-25           2025-11-24   \n",
+       "1            2024-11-19             2024-11-19           2025-03-31   \n",
+       "2            2024-12-02             2024-12-02           2025-03-31   \n",
+       "3            2024-11-12             2024-11-12           2025-05-11   \n",
+       "4            2024-11-18             2024-11-18           2026-11-17   \n",
+       "\n",
+       "   dpe_payRateDay  dpe_billRateDay                dpe_workSupervisorEmail  \\\n",
+       "0           450.0           513.83     recruitment@digital.justice.gov.uk   \n",
+       "1           600.0           685.10     recruitment@digital.justice.gov.uk   \n",
+       "2           650.0           742.20  gwion.aprhobat@digital.justice.gov.uk   \n",
+       "3           650.0           742.20  terrie.matharu@digital.justice.gov.uk   \n",
+       "4           799.0           818.18            sonia.taylor@Justice.gov.uk   \n",
+       "\n",
+       "   ...  dpe_currentWorkOrder dpe_requisitionType dpe_personID dpe_dateCreated  \\\n",
+       "0  ...                   Yes  1. New Requirement         None      2024-11-25   \n",
+       "1  ...                   Yes  1. New Requirement         None      2024-11-25   \n",
+       "2  ...                   Yes  1. New Requirement         None      2024-11-25   \n",
+       "3  ...                   Yes  1. New Requirement         None      2024-11-25   \n",
+       "4  ...                   Yes        2. Nominated         None      2024-11-25   \n",
+       "\n",
+       "  dpe_personSurname dpe_personFirstName dpe_personPreferredFirstName  \\\n",
+       "0             Moise             Neville                      Neville   \n",
+       "1             Aszyk              Lukasz                       Lukasz   \n",
+       "2             Versi               Abbas                        Abbas   \n",
+       "3             Bakpa              Ovovwe                       Ovovwe   \n",
+       "4            Belsey               Robin                        Robin   \n",
+       "\n",
+       "      dpe_employmentType               dpe_psrID               dpe_locationID  \n",
+       "0  Specialist Contractor  Moise-Neville-10224354  London - 10 South Colonnade  \n",
+       "1  Specialist Contractor   Aszyk-Lukasz-10224441  London - 10 South Colonnade  \n",
+       "2  Specialist Contractor    Versi-Abbas-10224411  London - 10 South Colonnade  \n",
+       "3  Specialist Contractor   Bakpa-Ovovwe-10224306  London - 10 South Colonnade  \n",
+       "4  Specialist Contractor   Belsey-Robin-10224303  London - 10 South Colonnade  \n",
+       "\n",
+       "[5 rows x 22 columns]"
+      ]
+     },
+     "execution_count": 158,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# to_excel(\"fg_all\", fg_all)\n",
+    "fg_all.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Fieldglass - Create contractor types: New, Extension, Leaver\n",
+    "\n",
+    "* Business Unit Code:    \"MOJ MOJ CFO DaT\"\n",
+    "\n",
+    "##### Leavers in September:\n",
+    "* Work Order Status:     Confirmed (Worker Closed)\n",
+    "* Current Work Order?:   No\n",
+    "* Work Order End Date:   01/09/2023 to 30/09/2023\n",
+    "\n",
+    "##### Joiners\n",
+    "* Work Order Status:     Confirmed\n",
+    "* Current Work Order?:   Yes\n",
+    "* Original start date == Work Order Start Date\n",
+    "\n",
+    "##### (in a specific period)\n",
+    "* Original start date:   01/09/2023 to 30/09/2023 (where this date…\n",
+    "* Work Order Start Date: 01/09/2023 to 30/09/2023 …equals this date)\n",
+    "\n",
+    "##### Extensions in September\n",
+    "* Work Order Status:     Confirmed\n",
+    "* Current Work Order?:   Yes\n",
+    "* Original start date:   01/09/2023 to 30/09/2023 (where this date…\n",
+    "* Work Order Start Date: 01/09/2023 to 30/09/2023 …does NOT equal this date)\n",
+    "\n",
+    "##### Properties to use\n",
+    "* dpe_originalStartDate\n",
+    "* dpe_workOrderStartDate\n",
+    "* dpe_workOrderEndDate\n",
+    "* dpe_requisitionType\n",
+    "* dpe_revisionNumber\n",
+    "* dpe_workOrderStatus\n",
+    "* dpe_currentWorkOrder\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 159,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Split all_fg into three datasets. The criteria should eliminate duplicates. But we'll check for once the dataset is in three and compare the counts as well.\n",
+    "\n",
+    "def get_new_requirements(dataframe):\n",
+    "    new_req = dataframe[(dataframe[\"dpe_workOrderStatus\"] == \"Confirmed\") & (dataframe[\"dpe_currentWorkOrder\"] == \"Yes\") & (dataframe[\"dpe_workOrderStartDate\"] == dataframe[\"dpe_originalStartDate\"])].copy(deep=True)\n",
+    "    new_req['dpe_contractorStatus'] = \"New Requirement\"\n",
+    "    return new_req\n",
+    "\n",
+    "def get_extensions(dataframe):\n",
+    "    extensions = dataframe[(dataframe[\"dpe_workOrderStatus\"] == \"Confirmed\") & (dataframe[\"dpe_currentWorkOrder\"] == \"Yes\") & (dataframe[\"dpe_workOrderStartDate\"] != dataframe[\"dpe_originalStartDate\"])].copy(deep=True)\n",
+    "    extensions['dpe_contractorStatus'] = \"Extension\"\n",
+    "    return extensions\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 160,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(132, 23)"
+      ]
+     },
+     "execution_count": 160,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "new_req = get_new_requirements(fg_all)\n",
+    "new_req.shape\n",
+    "# to_excel(\"raw new requirements\",new_req)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 161,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(291, 23)"
+      ]
+     },
+     "execution_count": 161,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "extensions = get_extensions(fg_all)\n",
+    "extensions.shape\n",
+    "# to_excel(\"raw extensions\",extensions)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Orgvue - Main dataframe \"all_ov\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 162,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Read and transform Orgvue data\n",
+    "def load_ov(filepath):\n",
+    "    # filepath from tkinter\n",
+    "    jd_ov = pd.read_csv(filepath)\n",
+    "    return jd_ov\n",
+    "\n",
+    "def get_contractors_ov(dataframe):\n",
+    "    # IMPORTANT - keeps only lines where dpe_employmentType = \"Contractor\"\n",
+    "    contractors_ov = dataframe[dataframe['dpe_employmentType'] == 'Specialist Contractor'].copy() # copy() ensures new dataframe and not a view\n",
+    "    return contractors_ov\n",
+    "\n",
+    "def reduce_ov(dataframe):\n",
+    "    # creates Fieldglass compatible name for left merge\n",
+    "    # dataframe.loc[:,'dpe_psrFullName'] = dataframe.loc[:,'dpe_personSurname'] + ', ' + dataframe.loc[:,'dpe_personFirstName']\n",
+    "    # create a new dataframe to cancel out view\n",
+    "    # dataframe = dataframe.copy(deep=True)\n",
+    "    # reduce columns \n",
+    "    dataframe = dataframe[ov_cols_to_keep].copy(deep=True)\n",
+    "    dataframe.reset_index(drop=True, inplace=True)\n",
+    "    return dataframe\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 163,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(812, 27)"
+      ]
+     },
+     "execution_count": 163,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "ov = load_ov(ov_path)\n",
+    "ov.shape\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 164,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(792, 27)"
+      ]
+     },
+     "execution_count": 164,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "ov_contractors = get_contractors_ov(ov)\n",
+    "ov_contractors.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 165,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(792, 23)"
+      ]
+     },
+     "execution_count": 165,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "ov_all = reduce_ov(ov_contractors)\n",
+    "ov_all.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 166,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>dpe_contractorNumber</th>\n",
+       "      <th>dpe_psrFullName</th>\n",
+       "      <th>dpe_jobTitle</th>\n",
+       "      <th>dpe_psrCostCentre</th>\n",
+       "      <th>dpe_payRateDay</th>\n",
+       "      <th>dpe_billRateDay</th>\n",
+       "      <th>dpe_locationID</th>\n",
+       "      <th>dpe_workSupervisorEmail</th>\n",
+       "      <th>dpe_originalStartDate</th>\n",
+       "      <th>dpe_workOrderStartDate</th>\n",
+       "      <th>...</th>\n",
+       "      <th>dpe_workOrderStatus</th>\n",
+       "      <th>dpe_currentWorkOrder</th>\n",
+       "      <th>dpe_contractorStatus</th>\n",
+       "      <th>dpe_psrID</th>\n",
+       "      <th>dpe_dateCreated</th>\n",
+       "      <th>dpe_personID</th>\n",
+       "      <th>dpe_personSurname</th>\n",
+       "      <th>dpe_personFirstName</th>\n",
+       "      <th>dpe_personPreferredFirstName</th>\n",
+       "      <th>dpe_employmentType</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>PSR1WO00095180</td>\n",
+       "      <td>Abbasi, Muhammed</td>\n",
+       "      <td>Senior Security Engineer</td>\n",
+       "      <td>10224306</td>\n",
+       "      <td>700.0</td>\n",
+       "      <td>716.80</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>ermias.worku@justice.gov.uk</td>\n",
+       "      <td>2024-11-06</td>\n",
+       "      <td>2024-11-06</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Confirmed</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>New Requirement</td>\n",
+       "      <td>Abbasi-Muhammed-10224306</td>\n",
+       "      <td>2024-11-22</td>\n",
+       "      <td>5934G-TAJKD-2J160</td>\n",
+       "      <td>Abbasi</td>\n",
+       "      <td>Muhammed</td>\n",
+       "      <td>Muhammed</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>PSR1WO00085882</td>\n",
+       "      <td>Abdillahi, Abdirizak</td>\n",
+       "      <td>Senior Business Analyst</td>\n",
+       "      <td>10224512</td>\n",
+       "      <td>600.0</td>\n",
+       "      <td>685.10</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>nicole.gomes@digital.justice.gov.uk</td>\n",
+       "      <td>2023-11-02</td>\n",
+       "      <td>2024-11-03</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Confirmed</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>Extension</td>\n",
+       "      <td>Abdillahi-Abdirizak-10224512</td>\n",
+       "      <td>2024-11-22</td>\n",
+       "      <td>GE806-WQY91-RKTXC</td>\n",
+       "      <td>Abdillahi</td>\n",
+       "      <td>Abdirizak</td>\n",
+       "      <td>Abdirizak</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>PSR1WO00078440</td>\n",
+       "      <td>Abel-Idowu, Diana</td>\n",
+       "      <td>Delivery Manager</td>\n",
+       "      <td>10224065</td>\n",
+       "      <td>600.0</td>\n",
+       "      <td>681.74</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>hardeep.kainth@justice.gov.uk</td>\n",
+       "      <td>2023-04-03</td>\n",
+       "      <td>2024-04-03</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Confirmed</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>Extension</td>\n",
+       "      <td>Abel-Idowu-Diana-10224065</td>\n",
+       "      <td>2024-09-25</td>\n",
+       "      <td>CU8T5-K6G51-0RK1E</td>\n",
+       "      <td>Abel-Idowu</td>\n",
+       "      <td>Diana</td>\n",
+       "      <td>Diana</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>PSR1WO00080809</td>\n",
+       "      <td>Acheampong, Prince</td>\n",
+       "      <td>Senior Business Analyst</td>\n",
+       "      <td>10224512</td>\n",
+       "      <td>660.0</td>\n",
+       "      <td>749.92</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>nicole.gomes@digital.justice.gov.uk</td>\n",
+       "      <td>2023-06-05</td>\n",
+       "      <td>2024-08-03</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Confirmed</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>Extension</td>\n",
+       "      <td>Acheampong-Prince-10224512</td>\n",
+       "      <td>2024-11-15</td>\n",
+       "      <td>9P6JD-UD1KU-GMC0G</td>\n",
+       "      <td>Acheampong</td>\n",
+       "      <td>Prince</td>\n",
+       "      <td>Prince</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>PSR1WO00085076</td>\n",
+       "      <td>Addoh, Eboni</td>\n",
+       "      <td>Stakeholder &amp; Comms Manager</td>\n",
+       "      <td>10224285</td>\n",
+       "      <td>600.0</td>\n",
+       "      <td>666.75</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>Daniel.Sprange1@justice.gov.uk</td>\n",
+       "      <td>2023-06-01</td>\n",
+       "      <td>2024-12-02</td>\n",
+       "      <td>...</td>\n",
+       "      <td>Confirmed</td>\n",
+       "      <td>Yes</td>\n",
+       "      <td>Extension</td>\n",
+       "      <td>Addoh-Eboni-10224285</td>\n",
+       "      <td>2024-11-22</td>\n",
+       "      <td>3248T-4DUVG-U21NU</td>\n",
+       "      <td>Addoh</td>\n",
+       "      <td>Eboni</td>\n",
+       "      <td>Eboni</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 23 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "  dpe_contractorNumber       dpe_psrFullName                 dpe_jobTitle  \\\n",
+       "0       PSR1WO00095180      Abbasi, Muhammed     Senior Security Engineer   \n",
+       "1       PSR1WO00085882  Abdillahi, Abdirizak      Senior Business Analyst   \n",
+       "2       PSR1WO00078440     Abel-Idowu, Diana             Delivery Manager   \n",
+       "3       PSR1WO00080809    Acheampong, Prince      Senior Business Analyst   \n",
+       "4       PSR1WO00085076          Addoh, Eboni  Stakeholder & Comms Manager   \n",
+       "\n",
+       "   dpe_psrCostCentre  dpe_payRateDay  dpe_billRateDay  \\\n",
+       "0           10224306           700.0           716.80   \n",
+       "1           10224512           600.0           685.10   \n",
+       "2           10224065           600.0           681.74   \n",
+       "3           10224512           660.0           749.92   \n",
+       "4           10224285           600.0           666.75   \n",
+       "\n",
+       "                dpe_locationID              dpe_workSupervisorEmail  \\\n",
+       "0  London - 10 South Colonnade          ermias.worku@justice.gov.uk   \n",
+       "1  London - 10 South Colonnade  nicole.gomes@digital.justice.gov.uk   \n",
+       "2  London - 10 South Colonnade        hardeep.kainth@justice.gov.uk   \n",
+       "3  London - 10 South Colonnade  nicole.gomes@digital.justice.gov.uk   \n",
+       "4  London - 10 South Colonnade       Daniel.Sprange1@justice.gov.uk   \n",
+       "\n",
+       "  dpe_originalStartDate dpe_workOrderStartDate  ... dpe_workOrderStatus  \\\n",
+       "0            2024-11-06             2024-11-06  ...           Confirmed   \n",
+       "1            2023-11-02             2024-11-03  ...           Confirmed   \n",
+       "2            2023-04-03             2024-04-03  ...           Confirmed   \n",
+       "3            2023-06-05             2024-08-03  ...           Confirmed   \n",
+       "4            2023-06-01             2024-12-02  ...           Confirmed   \n",
+       "\n",
+       "  dpe_currentWorkOrder  dpe_contractorStatus                     dpe_psrID  \\\n",
+       "0                  Yes       New Requirement      Abbasi-Muhammed-10224306   \n",
+       "1                  Yes             Extension  Abdillahi-Abdirizak-10224512   \n",
+       "2                  Yes             Extension     Abel-Idowu-Diana-10224065   \n",
+       "3                  Yes             Extension    Acheampong-Prince-10224512   \n",
+       "4                  Yes             Extension          Addoh-Eboni-10224285   \n",
+       "\n",
+       "  dpe_dateCreated       dpe_personID dpe_personSurname dpe_personFirstName  \\\n",
+       "0      2024-11-22  5934G-TAJKD-2J160            Abbasi            Muhammed   \n",
+       "1      2024-11-22  GE806-WQY91-RKTXC         Abdillahi           Abdirizak   \n",
+       "2      2024-09-25  CU8T5-K6G51-0RK1E        Abel-Idowu               Diana   \n",
+       "3      2024-11-15  9P6JD-UD1KU-GMC0G        Acheampong              Prince   \n",
+       "4      2024-11-22  3248T-4DUVG-U21NU             Addoh               Eboni   \n",
+       "\n",
+       "  dpe_personPreferredFirstName     dpe_employmentType  \n",
+       "0                     Muhammed  Specialist Contractor  \n",
+       "1                    Abdirizak  Specialist Contractor  \n",
+       "2                        Diana  Specialist Contractor  \n",
+       "3                       Prince  Specialist Contractor  \n",
+       "4                        Eboni  Specialist Contractor  \n",
+       "\n",
+       "[5 rows x 23 columns]"
+      ]
+     },
+     "execution_count": 166,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "ov_all.head()\n",
+    "# to_excel(\"ov_all\",ov_all)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 167,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def check_for_duplicates(dataframe,name):\n",
+    "    if dataframe['dpe_psrID'].duplicated().any():\n",
+    "        dup_mask = dataframe['dpe_psrID'].duplicated()\n",
+    "        dup_df = dataframe[dup_mask]\n",
+    "        dup_count = dataframe['dpe_psrID'].duplicated().sum()\n",
+    "        # messagebox.showinfo(\"FYI\", f\"{dup_count} duplicates found in {name} DataFrame.\")\n",
+    "        print(f\"{dup_count} duplicates found in {name} DataFrame.\")\n",
+    "        # to_excel(f\"{dup_count} duplicates outputs\",dataframe)\n",
+    "    else:\n",
+    "        print(f\"Zero duplicates found in {name} DataFrame.\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 168,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Zero duplicates found in New Requirements DataFrame.\n",
+      "Zero duplicates found in Extensions DataFrame.\n",
+      "Zero duplicates found in Orgvue DataFrame.\n"
+     ]
+    }
+   ],
+   "source": [
+    "check_for_duplicates(new_req,'New Requirements')\n",
+    "check_for_duplicates(extensions,'Extensions')\n",
+    "check_for_duplicates(ov_all,'Orgvue')\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Build Extensions Output (Inner merge with ov_all)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 169,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def make_ov_all_merge_ready(dataframe):   \n",
+    "    ov_all_psrID = dataframe[ov_cols_to_keep_for_merge].copy(deep=True)\n",
+    "    ov_all_psrID.reset_index(drop=True, inplace=True)\n",
+    "    return ov_all_psrID\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 170,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ov_all_psrID = make_ov_all_merge_ready(ov_all)\n",
+    "# to_excel(\"ov_all_psrID\",ov_all_psrID)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 171,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(206, 24)"
+      ]
+     },
+     "execution_count": 171,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Inner merge ov_all with extensions to produce a table of only extensions introducing no new lines to the people data set on upload to Orgvue\n",
+    "extensions_output = ov_all_psrID.merge(extensions,on='dpe_psrID',how='inner',suffixes=('_fg','_ov'))\n",
+    "extensions_output.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 172,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "Index(['dpe_personID', 'dpe_psrID', 'dpe_contractorNumber', 'dpe_psrFullName',\n",
+       "       'dpe_jobTitle', 'dpe_psrCostCentre', 'dpe_originalStartDate',\n",
+       "       'dpe_workOrderStartDate', 'dpe_workOrderEndDate', 'dpe_payRateDay',\n",
+       "       'dpe_billRateDay', 'dpe_workSupervisorEmail', 'dpe_revisionNumber',\n",
+       "       'dpe_workOrderStatus', 'dpe_currentWorkOrder', 'dpe_requisitionType',\n",
+       "       'dpe_dateCreated', 'dpe_personSurname', 'dpe_personFirstName',\n",
+       "       'dpe_personPreferredFirstName', 'dpe_employmentType', 'dpe_locationID',\n",
+       "       'dpe_contractorStatus'],\n",
+       "      dtype='object')"
+      ]
+     },
+     "execution_count": 172,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Clean up after the merge\n",
+    "extensions_output.rename(columns={'dpe_personID_fg': 'dpe_personID'}, inplace=True)\n",
+    "extensions_output.drop(columns=\"dpe_personID_ov\",inplace=True)\n",
+    "\n",
+    "extensions_output.columns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 173,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Write to file\n",
+    "# to_excel(\"Extensions Table for Upload to Orgvue\",extensions_output)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Build New Requirements Output"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 174,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>dpe_contractorNumber</th>\n",
+       "      <th>dpe_psrFullName</th>\n",
+       "      <th>dpe_jobTitle</th>\n",
+       "      <th>dpe_psrCostCentre</th>\n",
+       "      <th>dpe_originalStartDate</th>\n",
+       "      <th>dpe_workOrderStartDate</th>\n",
+       "      <th>dpe_workOrderEndDate</th>\n",
+       "      <th>dpe_payRateDay</th>\n",
+       "      <th>dpe_billRateDay</th>\n",
+       "      <th>dpe_workSupervisorEmail</th>\n",
+       "      <th>...</th>\n",
+       "      <th>dpe_requisitionType</th>\n",
+       "      <th>dpe_personID</th>\n",
+       "      <th>dpe_dateCreated</th>\n",
+       "      <th>dpe_personSurname</th>\n",
+       "      <th>dpe_personFirstName</th>\n",
+       "      <th>dpe_personPreferredFirstName</th>\n",
+       "      <th>dpe_employmentType</th>\n",
+       "      <th>dpe_psrID</th>\n",
+       "      <th>dpe_locationID</th>\n",
+       "      <th>dpe_contractorStatus</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>1683</th>\n",
+       "      <td>PSR1WO00087155</td>\n",
+       "      <td>OJUKWU, Ona</td>\n",
+       "      <td>Programme Manager</td>\n",
+       "      <td>10224283</td>\n",
+       "      <td>2024-01-03</td>\n",
+       "      <td>2024-01-03</td>\n",
+       "      <td>2025-01-02</td>\n",
+       "      <td>799.0</td>\n",
+       "      <td>907.86</td>\n",
+       "      <td>eki.osehenye@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>OJUKWU</td>\n",
+       "      <td>Ona</td>\n",
+       "      <td>Ona</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>OJUKWU-Ona-10224283</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>New Requirement</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1701</th>\n",
+       "      <td>PSR1WO00087963</td>\n",
+       "      <td>Brozyna, Anna</td>\n",
+       "      <td>Bench User Researcher</td>\n",
+       "      <td>10221022</td>\n",
+       "      <td>2024-01-15</td>\n",
+       "      <td>2024-01-15</td>\n",
+       "      <td>2025-01-14</td>\n",
+       "      <td>650.0</td>\n",
+       "      <td>667.26</td>\n",
+       "      <td>Alex.Edmond@justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>2. Nominated</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Brozyna</td>\n",
+       "      <td>Anna</td>\n",
+       "      <td>Anna</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Brozyna-Anna-10221022</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>New Requirement</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1707</th>\n",
+       "      <td>PSR1WO00088263</td>\n",
+       "      <td>Brewster, Christina</td>\n",
+       "      <td>Programme Delivery Manager (deployment)</td>\n",
+       "      <td>10224285</td>\n",
+       "      <td>2024-01-26</td>\n",
+       "      <td>2024-01-26</td>\n",
+       "      <td>2025-01-25</td>\n",
+       "      <td>600.0</td>\n",
+       "      <td>615.93</td>\n",
+       "      <td>sonia.taylor@Justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>2. Nominated</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Brewster</td>\n",
+       "      <td>Christina</td>\n",
+       "      <td>Christina</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Brewster-Christina-10224285</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>New Requirement</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1719</th>\n",
+       "      <td>PSR1WO00089046</td>\n",
+       "      <td>Mohan, Mahesh</td>\n",
+       "      <td>Senior Product Manager</td>\n",
+       "      <td>10224411</td>\n",
+       "      <td>2024-02-20</td>\n",
+       "      <td>2024-02-20</td>\n",
+       "      <td>2025-02-19</td>\n",
+       "      <td>650.0</td>\n",
+       "      <td>738.56</td>\n",
+       "      <td>monika.crowley@digital.justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Mohan</td>\n",
+       "      <td>Mahesh</td>\n",
+       "      <td>Mahesh</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Mohan-Mahesh-10224411</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>New Requirement</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1726</th>\n",
+       "      <td>PSR1WO00089009</td>\n",
+       "      <td>Kingdom, Sam</td>\n",
+       "      <td>Knowledge Author</td>\n",
+       "      <td>10224285</td>\n",
+       "      <td>2024-02-26</td>\n",
+       "      <td>2024-02-26</td>\n",
+       "      <td>2025-02-25</td>\n",
+       "      <td>525.0</td>\n",
+       "      <td>580.55</td>\n",
+       "      <td>sonia.taylor@Justice.gov.uk</td>\n",
+       "      <td>...</td>\n",
+       "      <td>1. New Requirement</td>\n",
+       "      <td>None</td>\n",
+       "      <td>2024-11-25</td>\n",
+       "      <td>Kingdom</td>\n",
+       "      <td>Sam</td>\n",
+       "      <td>Sam</td>\n",
+       "      <td>Specialist Contractor</td>\n",
+       "      <td>Kingdom-Sam-10224285</td>\n",
+       "      <td>London - 10 South Colonnade</td>\n",
+       "      <td>New Requirement</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 23 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     dpe_contractorNumber      dpe_psrFullName  \\\n",
+       "1683       PSR1WO00087155          OJUKWU, Ona   \n",
+       "1701       PSR1WO00087963        Brozyna, Anna   \n",
+       "1707       PSR1WO00088263  Brewster, Christina   \n",
+       "1719       PSR1WO00089046        Mohan, Mahesh   \n",
+       "1726       PSR1WO00089009         Kingdom, Sam   \n",
+       "\n",
+       "                                 dpe_jobTitle dpe_psrCostCentre  \\\n",
+       "1683                        Programme Manager          10224283   \n",
+       "1701                    Bench User Researcher          10221022   \n",
+       "1707  Programme Delivery Manager (deployment)          10224285   \n",
+       "1719                   Senior Product Manager          10224411   \n",
+       "1726                         Knowledge Author          10224285   \n",
+       "\n",
+       "     dpe_originalStartDate dpe_workOrderStartDate dpe_workOrderEndDate  \\\n",
+       "1683            2024-01-03             2024-01-03           2025-01-02   \n",
+       "1701            2024-01-15             2024-01-15           2025-01-14   \n",
+       "1707            2024-01-26             2024-01-26           2025-01-25   \n",
+       "1719            2024-02-20             2024-02-20           2025-02-19   \n",
+       "1726            2024-02-26             2024-02-26           2025-02-25   \n",
+       "\n",
+       "      dpe_payRateDay  dpe_billRateDay                dpe_workSupervisorEmail  \\\n",
+       "1683           799.0           907.86    eki.osehenye@digital.justice.gov.uk   \n",
+       "1701           650.0           667.26             Alex.Edmond@justice.gov.uk   \n",
+       "1707           600.0           615.93            sonia.taylor@Justice.gov.uk   \n",
+       "1719           650.0           738.56  monika.crowley@digital.justice.gov.uk   \n",
+       "1726           525.0           580.55            sonia.taylor@Justice.gov.uk   \n",
+       "\n",
+       "      ...  dpe_requisitionType dpe_personID dpe_dateCreated dpe_personSurname  \\\n",
+       "1683  ...   1. New Requirement         None      2024-11-25            OJUKWU   \n",
+       "1701  ...         2. Nominated         None      2024-11-25           Brozyna   \n",
+       "1707  ...         2. Nominated         None      2024-11-25          Brewster   \n",
+       "1719  ...   1. New Requirement         None      2024-11-25             Mohan   \n",
+       "1726  ...   1. New Requirement         None      2024-11-25           Kingdom   \n",
+       "\n",
+       "     dpe_personFirstName dpe_personPreferredFirstName     dpe_employmentType  \\\n",
+       "1683                 Ona                          Ona  Specialist Contractor   \n",
+       "1701                Anna                         Anna  Specialist Contractor   \n",
+       "1707           Christina                    Christina  Specialist Contractor   \n",
+       "1719              Mahesh                       Mahesh  Specialist Contractor   \n",
+       "1726                 Sam                          Sam  Specialist Contractor   \n",
+       "\n",
+       "                        dpe_psrID               dpe_locationID  \\\n",
+       "1683          OJUKWU-Ona-10224283  London - 10 South Colonnade   \n",
+       "1701        Brozyna-Anna-10221022  London - 10 South Colonnade   \n",
+       "1707  Brewster-Christina-10224285  London - 10 South Colonnade   \n",
+       "1719        Mohan-Mahesh-10224411  London - 10 South Colonnade   \n",
+       "1726         Kingdom-Sam-10224285  London - 10 South Colonnade   \n",
+       "\n",
+       "     dpe_contractorStatus  \n",
+       "1683      New Requirement  \n",
+       "1701      New Requirement  \n",
+       "1707      New Requirement  \n",
+       "1719      New Requirement  \n",
+       "1726      New Requirement  \n",
+       "\n",
+       "[5 rows x 23 columns]"
+      ]
+     },
+     "execution_count": 174,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "new_req.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 175,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "132"
+      ]
+     },
+     "execution_count": 175,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Find common dpe_psrID values\n",
+    "common_ids = new_req['dpe_psrID'].isin(ov_all['dpe_psrID'])\n",
+    "# Keep rows in new_req not in ov_all\n",
+    "# This is new entrants to the dataset\n",
+    "new_req_joiners = new_req[~common_ids]\n",
+    "\n",
+    "# This is new requirements already in the dataset.\n",
+    "new_req_in_post = new_req[common_ids]\n",
+    "common_ids.size"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 176,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Zero duplicates found in new_req_joiners DataFrame.\n",
+      "Zero duplicates found in new_req_in_post DataFrame.\n"
+     ]
+    }
+   ],
+   "source": [
+    "check_for_duplicates(new_req_joiners,'new_req_joiners')\n",
+    "check_for_duplicates(new_req_in_post,'new_req_in_post')\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 177,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# to_excel(\"new_req_joiners\",new_req_joiners)\n",
+    "# to_excel(\"new_req_in_post\",new_req_in_post)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 178,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# New Request In Post\n",
+    "# Treat like extensions because they're already in the dataset\n",
+    "# Inner merge ov_all with extensions to produce a table of only extensions introducing no new lines to the people data set on upload to Orgvue\n",
+    "new_req_in_post_output = ov_all_psrID.merge(new_req_in_post,on='dpe_psrID',how='inner',suffixes=('_fg','_ov'))\n",
+    "# new_req_in_post.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 179,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "Index(['dpe_personID', 'dpe_psrID', 'dpe_contractorNumber', 'dpe_psrFullName',\n",
+       "       'dpe_jobTitle', 'dpe_psrCostCentre', 'dpe_originalStartDate',\n",
+       "       'dpe_workOrderStartDate', 'dpe_workOrderEndDate', 'dpe_payRateDay',\n",
+       "       'dpe_billRateDay', 'dpe_workSupervisorEmail', 'dpe_revisionNumber',\n",
+       "       'dpe_workOrderStatus', 'dpe_currentWorkOrder', 'dpe_requisitionType',\n",
+       "       'dpe_dateCreated', 'dpe_personSurname', 'dpe_personFirstName',\n",
+       "       'dpe_personPreferredFirstName', 'dpe_employmentType', 'dpe_locationID',\n",
+       "       'dpe_contractorStatus'],\n",
+       "      dtype='object')"
+      ]
+     },
+     "execution_count": 179,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Clean up after the merge\n",
+    "new_req_in_post_output.rename(columns={'dpe_personID_fg': 'dpe_personID'}, inplace=True)\n",
+    "new_req_in_post_output.drop(columns=\"dpe_personID_ov\",inplace=True)\n",
+    "\n",
+    "new_req_in_post_output.columns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 180,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# to_excel(\"new_req_in_post_output\",new_req_in_post_output)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 181,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Zero duplicates found in new_req_in_post_output DataFrame.\n"
+     ]
+    }
+   ],
+   "source": [
+    "check_for_duplicates(new_req_in_post_output,'new_req_in_post_output')\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 182,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# from the merged dataset, we now have the rows with a gap indicating they're new contractors\n",
+    "def insert_personID(df):\n",
+    "    # mask to identify the rows that need an ID (are new contractors)\n",
+    "    needs_an_id = df['dpe_personID'].isna()\n",
+    "    # get a small dataframe of IDs and dates from the source file\n",
+    "    new_id = extract_ID(needs_an_id.sum(), working_files_path + \"/\" + 'new_orgvue_ids.csv')\n",
+    "    # uses the mask to insert the values\n",
+    "    # length of new_ids must equal number of false in needs_an_id\n",
+    "    df.loc[needs_an_id, 'dpe_personID'] = new_id.values\n",
+    "    return df\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 183,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "\n",
+    "# Add person IDs and date created stampt to rows with no existing value in Orgvue (how we find new contractors)\n",
+    "new_req_joiners_output = insert_personID(new_req_joiners).copy(deep=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 184,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# copy to clipboard for pasting into Orgvue merge property\n",
+    "# new_req_added_ov_all.to_clipboard(index=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 185,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# to_excel(\"new_req_output\",new_req_output)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Concat to One Export File"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 186,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "orgvue_upload = pd.concat([new_req_joiners_output,extensions_output, new_req_in_post_output], ignore_index=True)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 187,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "to_excel(\"orgvue_upload\",orgvue_upload)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 188,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# # Get path and filename (in a combined string returned from filedialog)\n",
+    "# messagebox.showinfo(\"Save\",\"Finally, where would you like to save the output? The data will also be saved to the clipboard\")\n",
+    "# save_path = filedialog.asksaveasfilename(title=\"Save file as...\", filetypes=[(\"Excel files\", \"*.xlsx\")])\n",
+    "\n",
+    "\n",
+    "# # Write and timestamp file to XLS\n",
+    "\n",
+    "# def to_excel(filename, df):\n",
+    "#     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')\n",
+    "#     filename = f'{filename} {timestamp}.xlsx'\n",
+    "#     df.to_excel(filename, index=False)\n",
+    "\n",
+    "# # save the merged dßataframe\n",
+    "# to_excel(save_path,merged)\n",
+    "\n",
+    "# # copy to clipboard for pasting into Orgvue merge property\n",
+    "# merged.to_clipboard(index=False)\n",
+    "\n",
+    "# # Destroy the root window to terminate tkinter\n",
+    "# root.destroy()\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": ".venv",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.6"
+  },
+  "orig_nbformat": 4
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
